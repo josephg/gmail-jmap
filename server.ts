@@ -256,6 +256,34 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
         role: 'trash',
         sortOrder: 5,
       },
+      CATEGORY_PERSONAL: {
+        name: 'Personal',
+        parentId: 'INBOX',
+        sortOrder: 1,
+      },
+      CATEGORY_SOCIAL: {
+        name: 'Social',
+        parentId: 'INBOX',
+        sortOrder: 2,
+      },
+      CATEGORY_PROMOTIONS: {
+        name: 'Promotions',
+        parentId: 'INBOX',
+        sortOrder: 3,
+      },
+      CATEGORY_UPDATES: {
+        name: 'Updates',
+        parentId: 'INBOX',
+        sortOrder: 4,
+      },
+      CATEGORY_FORUMS: {
+        name: 'Forums',
+        parentId: 'INBOX',
+        sortOrder: 5,
+      },
+      CHAT: {
+        name: 'Chat',
+      },
     };
 
 
