@@ -133,7 +133,7 @@ const parseNameAndEmail = function ( nameAndEmail: string ) {
 // compliance
 const parseEmails = function ( string: string | null | undefined ) {
   if (string == null) return null
-  var emails = [];
+  var emails : { name: string, email: string }[] = [];
   var inQuote = false;
   var start = 0;
   var end = 0;
@@ -164,6 +164,53 @@ const parseEmails = function ( string: string | null | undefined ) {
       emails.push( parseNameAndEmail( string.slice( start, end ) ) );
   }
   return emails;
+};
+
+const parseMessageIds = function ( value: string | null | undefined ) {
+  if (value == null) return null;
+  return value.replace( /[<>]/g, '' ).split( ',' );
+}
+
+const getHeader = (payload: gmail_v1.Schema$MessagePart, name: string) => {
+  const h = payload.headers!.find(h => h.name!.toLowerCase() === name)
+  return h ? h.value! : null
+}
+
+const extractBodyStructure = function ( payload: gmail_v1.Schema$MessagePart ) : any {
+  return {
+    partId: payload.mimeType!.startsWith( 'multipart/' ) ?
+      null :
+      payload.partId,
+    blobId: payload.body!.attachmentId,
+    size: payload.body!.size,
+    headers: payload.headers,
+    name: payload.filename || null,
+    type: payload.mimeType || 'text/plain',
+    charset: 'utf-8', // TODO
+    disposition: getHeader( payload, 'content-disposition' ),
+    cid: getHeader( payload, 'content-id' ),
+    language: null,
+    location: getHeader( payload, 'content-location' ),
+    subParts: payload.mimeType!.startsWith( 'multipart/' ) ?
+      payload.parts!.map( extractBodyStructure ) :
+      null,
+  };
+};
+
+const extractBodyValues = function ( payload, bodyValues ) {
+  var partId = payload.partId;
+  var data = payload.body.data;
+  if ( data ) {
+    bodyValues[ partId ] = {
+      value: Buffer.from( data, 'base64' ).toString( 'utf8' ),
+      isEncodingProblem: false,
+      isTruncated: false,
+    };
+  } else if ( payload.parts ) {
+    payload.parts.forEach( part => extractBodyValues( part, bodyValues ) );
+  }
+
+  return bodyValues;
 };
 
 const onlyTrue = (obj: {[k: string]: boolean}) => (
@@ -268,7 +315,7 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
     let offset = 0
 
     let pageToken = ''
-    let threadsAll = []
+    let threadsAll : string[] = []
 
     while (true) {
       const q = {
@@ -287,7 +334,7 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
           default:
             console.warn('Unknown / unsupported filter type', f)
         }
-        // if (f === 'inMailbox') 
+        // if (f === 'inMailbox')
       }
 
       const { threads, nextPageToken, resultSizeEstimate } = (await gmail.users.threads.list(q)).data;
@@ -303,8 +350,7 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
             (await gmail.users.threads.get({
               userId: 'me',
               id,
-              format: 'metadata',
-              metadataHeaders: ['from', 'to', 'subject']
+              format: 'full',
             })).data
           ))
         )
@@ -352,11 +398,6 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
       if (cacheValue) {
         // We've got it
 
-        const getHeader = (msg: gmail_v1.Schema$Message, name: string) => {
-          const h = msg.payload!.headers!.find(h => h.name!.toLowerCase() === name)
-          return h ? h.value! : null
-        }
-
         const getProperty: { [k: string]: (m: gmail_v1.Schema$Message) => any } = {
           id: m => m.id,
           threadId: m => m.threadId,
@@ -370,12 +411,25 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
             $important: m.labelIds!.includes( 'IMPORTANT' ),
           }),
           hasAttachment: m => false,
-          subject: m => getHeader(m, 'subject'),
-          from: m => parseEmails(getHeader(m, 'from')),
-          to: m => parseEmails(getHeader(m, 'to')),
+          subject: m => getHeader(m.payload!, 'subject'),
+          from: m => parseEmails(getHeader(m.payload!, 'from')),
+          to: m => parseEmails(getHeader(m.payload!, 'to')),
           receivedAt: m => new Date(+m.internalDate!).toJSON(),
           size: m => m.sizeEstimate,
           preview: m => m.snippet,
+          blobId: m => 'Users.message:' + m.id,
+          messageId: m => parseMessageIds(getHeader(m.payload!, 'message-id')),
+          inReplyTo: m => parseMessageIds(getHeader(m.payload!, 'in-reply-to')),
+          'header:list-id:asText': m => null,
+          'header:list-post:asURLs': m => null,
+          references: m => parseMessageIds(getHeader(m.payload!, 'references')),
+          sender: m => parseEmails(getHeader(m.payload!, 'sender')),
+          cc: m => parseEmails(getHeader(m.payload!, 'cc')),
+          bcc: m => parseEmails(getHeader(m.payload!, 'bcc')),
+          replyTo: m => parseEmails(getHeader(m.payload!, 'replyTo')),
+          sentAt: m => new Date(getHeader(m.payload!, 'date')!).toJSON(),
+          bodyStructure: m => extractBodyStructure(m.payload!),
+          bodyValues: m => extractBodyValues(m.payload, {}),
         }
 
         return Object.fromEntries(properties.map(prop => ([prop, getProperty[prop](cacheValue)])))
@@ -436,17 +490,17 @@ const resolvers: { [name: string]: (args: JMAPArgs, cache: Cache) => Promise<{ n
   },
 }
 
+const cache: Cache = {
+  messageCache: new Map(),
+  threadCache: new Map(),
+};
+
 app.post('/api', async (req, res) => {
   res.setHeader('access-control-allow-origin', '*')
   const request = req.body as JMAPRequest
   console.log('got request', request)
 
   const methodResponses: JMAPInvocation[] = []
-
-  const cache: Cache = {
-    messageCache: new Map(),
-    threadCache: new Map(),
-  }
 
   for (const method of request.methodCalls) {
     const [name, args, tag] = method
